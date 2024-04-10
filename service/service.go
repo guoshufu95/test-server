@@ -7,6 +7,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"sxp-server/logger"
+
 	"sxp-server/helper"
 )
 
@@ -71,4 +73,9 @@ func UnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServ
 		fmt.Printf("RPC failed with error %v\n", err)
 	}
 	return m, err
+}
+
+func NewZapLog() *logger.ZapLog {
+	l := logger.GetLogger()
+	return l
 }

@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
 	"google.golang.org/grpc"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"sxp-server/helper"
+	"sxp-server/logger"
 	"sxp-server/model"
 	"sxp-server/pb"
 	"sxp-server/service"
@@ -17,7 +21,14 @@ import (
 )
 
 type modelSever struct {
+	log *logger.ZapLog
 	pb.UnimplementedModelServer
+}
+
+func newModelServer() *modelSever {
+	return &modelSever{
+		log: logger.GetLogger(),
+	}
 }
 
 func (m *modelSever) GetModel(ctx context.Context, request *pb.ModelRequest) (res *pb.ModelResponse, err error) {
@@ -30,6 +41,7 @@ func (m *modelSever) GetModel(ctx context.Context, request *pb.ModelRequest) (re
 	time.Sleep(100 * time.Millisecond)
 	err = helper.HeadResponse(ctx, "1")
 	if err != nil {
+		m.log.Error(err)
 		return
 	}
 	pm := model.ProductMap
@@ -52,11 +64,13 @@ func (m *modelSever) UpdateModel(ctx context.Context, request *pb.UpdateRequest)
 	// 设置trailer
 	defer func() {
 		if err = helper.TrailerResponse(ctx); err != nil {
+			m.log.Error(err)
 			return
 		}
 	}()
 	err = helper.HeadResponse(ctx, "1")
 	if err != nil {
+		m.log.Error(err)
 		return
 	}
 
@@ -70,59 +84,87 @@ func (m *modelSever) UpdateModel(ctx context.Context, request *pb.UpdateRequest)
 	return
 }
 
+// GetByStatus
+//
+//	@Description: 流式处理
+//	@receiver m
+//	@param stream
+//	@return err
 func (m *modelSever) GetByStatus(stream pb.Model_GetByStatusServer) (err error) {
+	closeCh := make(chan struct{})
 	// 在defer中创建trailer记录函数的返回时间.
 	defer func() {
 		if err = helper.TrailerResponse(stream.Context()); err != nil {
+			m.log.Error(err)
 			return
 		}
 	}()
 	err = helper.HeadResponse(stream.Context(), "1")
 	if err != nil {
+		m.log.Error(err)
 		return
 	}
 	data := make([]model.Product, 0)
-	for {
-		request, er := stream.Recv()
-		if er != nil && er != io.EOF {
-			fmt.Println("Recv error:", er.Error())
-			continue
-		} else if er == io.EOF {
-			fmt.Println("Recv EOF")
-			break
-		}
-		pm := model.ProductMap
-		for _, v := range pm {
-			if v.Status == request.GetStatus() {
-				data = append(data, v)
-				stream.Send(&pb.StatusResponse{
-					ProductId: strconv.Itoa(v.Id),
-					Product:   v.Name,
-					Status:    v.Status,
-				})
+	go func() {
+		for {
+			request, er := stream.Recv()
+			if er != nil && er != io.EOF {
+				m.log.Errorf("Recv error: %s", er.Error())
+				return
+			} else if er == io.EOF {
+				m.log.Error("Recv EOF")
+				closeCh <- struct{}{}
+				return
+			}
+			pm := model.ProductMap
+			for _, v := range pm {
+				if v.Status == request.GetStatus() {
+					data = append(data, v)
+					stream.Send(&pb.StatusResponse{
+						ProductId: strconv.Itoa(v.Id),
+						Product:   v.Name,
+						Status:    v.Status,
+					})
+				}
 			}
 		}
-		break
+
+	}()
+	for {
+		select {
+		case <-stream.Context().Done():
+			m.log.Error("超时错误！")
+			return
+		case <-closeCh:
+			m.log.Info("发送完毕！")
+			return
+		}
 	}
-	return
+
 }
 
 func main() {
 	model.Init()
-	lis, err := net.Listen("tcp", ":9001")
+	lis, err := net.Listen("tcp", ":9011")
 	if err != nil {
-		fmt.Printf("failed to listen: %v", err)
+		log.Fatalf("failed to listen: %s", err.Error())
 		return
 	}
 	// 初始化tracer
 	trace, _, err := tracer.NewJaegerTracer("sxp-server", "192.168.111.143:6831")
+	l := service.NewZapLog()
+	grpc_zap.ReplaceGrpcLoggerV2(l.Zl)
 	s := grpc.NewServer(
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(service.UnaryInterceptor,
+			grpc_zap.UnaryServerInterceptor(l.Zl),
+			grpc_recovery.UnaryServerInterceptor(),
 			tracer.UnaryTraceInterceptor(trace))),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(grpc_middleware.ChainStreamServer(
 			service.StreamInterceptor,
+			grpc_zap.StreamServerInterceptor(l.Zl),
+			grpc_recovery.StreamServerInterceptor(),
 			tracer.StreamTraceInterceptor(trace))))) // 创建gRPC服务器
-	pb.RegisterModelServer(s, &modelSever{}) // 在gRPC服务端注册服务
+	pb.RegisterModelServer(s, newModelServer()) // 在gRPC服务端注册服务
 	// 启动服务
 	err = s.Serve(lis)
 
