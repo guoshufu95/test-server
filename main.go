@@ -120,15 +120,18 @@ func (m *modelSever) GetByStatus(stream pb.Model_GetByStatusServer) (err error) 
 			for _, v := range pm {
 				if v.Status == request.GetStatus() {
 					data = append(data, v)
-					stream.Send(&pb.StatusResponse{
+					err = stream.Send(&pb.StatusResponse{
 						ProductId: strconv.Itoa(v.Id),
 						Product:   v.Name,
 						Status:    v.Status,
 					})
+					if err != nil {
+						m.log.Error(err)
+						return
+					}
 				}
 			}
 		}
-
 	}()
 	for {
 		select {
