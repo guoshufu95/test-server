@@ -17,7 +17,6 @@ import (
 	"sxp-server/pb"
 	"sxp-server/service"
 	"sxp-server/tracer"
-	"time"
 )
 
 type modelSever struct {
@@ -38,7 +37,6 @@ func (m *modelSever) GetModel(ctx context.Context, request *pb.ModelRequest) (re
 			return
 		}
 	}()
-	time.Sleep(100 * time.Millisecond)
 	err = helper.HeadResponse(ctx, "1")
 	if err != nil {
 		m.log.Error(err)
@@ -92,13 +90,13 @@ func (m *modelSever) UpdateModel(ctx context.Context, request *pb.UpdateRequest)
 //	@return err
 func (m *modelSever) GetByStatus(stream pb.Model_GetByStatusServer) (err error) {
 	closeCh := make(chan struct{})
-	// 在defer中创建trailer记录函数的返回时间.
-	defer func() {
-		if err = helper.TrailerResponse(stream.Context()); err != nil {
-			m.log.Error(err)
-			return
-		}
-	}()
+	//// 在defer中创建trailer记录函数的返回时间.
+	//defer func() {
+	//	if err = helper.TrailerResponse(stream.Context()); err != nil {
+	//		m.log.Error(err)
+	//		return
+	//	}
+	//}()
 	err = helper.HeadResponse(stream.Context(), "1")
 	if err != nil {
 		m.log.Error(err)
@@ -112,7 +110,7 @@ func (m *modelSever) GetByStatus(stream pb.Model_GetByStatusServer) (err error) 
 				m.log.Errorf("Recv error: %s", er.Error())
 				return
 			} else if er == io.EOF {
-				m.log.Error("Recv EOF")
+				m.log.Info("Recv EOF")
 				closeCh <- struct{}{}
 				return
 			}
@@ -140,6 +138,10 @@ func (m *modelSever) GetByStatus(stream pb.Model_GetByStatusServer) (err error) 
 			return
 		case <-closeCh:
 			m.log.Info("发送完毕！")
+			if err = helper.TrailerResponse(stream.Context()); err != nil {
+				m.log.Error(err)
+				return
+			}
 			return
 		}
 	}
@@ -158,7 +160,8 @@ func main() {
 	l := service.NewZapLog()
 	grpc_zap.ReplaceGrpcLoggerV2(l.Zl)
 	s := grpc.NewServer(
-		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(service.UnaryInterceptor,
+		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
+			service.UnaryInterceptor,
 			grpc_zap.UnaryServerInterceptor(l.Zl),
 			grpc_recovery.UnaryServerInterceptor(),
 			tracer.UnaryTraceInterceptor(trace))),
